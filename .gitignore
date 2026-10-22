@@ -1,0 +1,22 @@
+# Local assistant state
+.workbuddy-ai/
+.codex/
+.agents/
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Dependencies, logs and diagnostic exports
+node_modules/
+*.log
+cx-diag-*.json
+
+# Editor and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
