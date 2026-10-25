@@ -252,6 +252,80 @@ function attachNext(t) {
     assert.equal(t.cx.state.marks['3.6'], undefined);
     console.log('PASS 未完成的测验仍保留处理，不当作已完成跳过');
   }
+  {
+    const t = setup();
+    const target = { contentType: 'quiz', listResourceCode: '5.6', isQuizLearned: false };
+    const following = { ...t.node, name: '第六章导言', listResourceCode: '6.1' };
+    t.store.state.courseListTree.sub.push(target, following);
+    let selected = null;
+    const make = (text, order) => ({ textContent: text, order, closest: () => null,
+      getClientRects: () => [1], contains: () => false,
+      compareDocumentPosition(other) { return this.order < other.order ? 4 : 2; },
+      click() { selected = order; t.store.state.courseActiveList = target; } });
+    const items = [make('随堂测验', 0), make(t.node.name, 1), make('随堂测验', 2),
+      make(following.name, 3), make('随堂测验', 4)];
+    t.box.document.querySelectorAll = (selector) => selector === 'a,button,span,div,li' ? items : [];
+    t.cx.next();
+    assert.equal(selected, 2);
+    assert.equal(t.store.state.courseActiveList, target);
+    assert.equal(t.cx.cfg.running, true);
+    console.log('PASS 未命名测验通过前后课件定位，多个同名测验不会串章');
+  }
+  {
+    const t = setup();
+    const target = { contentType: 'quiz', listResourceCode: '5.6', isQuizLearned: false,
+      courseWareId: '11111111-2222-3333-4444-555555555555' };
+    t.store.state.courseListTree.sub.push(target);
+    let clicks = 0;
+    const item = { textContent: '随堂测验', closest: () => null, getClientRects: () => [1],
+      contains: () => false, __vue__: { $props: { item: target } },
+      click: () => { clicks++; t.store.state.courseActiveList = target; } };
+    const container = { ...item, textContent: '目录', __vue__: { $props: { items: [target] } },
+      click: () => { throw new Error('不能点击整份课程树容器'); } };
+    t.box.document.querySelectorAll = (selector) => selector === 'a,button,span,div,li' ? [container, item] : [];
+    t.cx.next();
+    assert.equal(clicks, 1);
+    console.log('PASS 通过 Vue 绑定资源 ID 进入未命名测验，不把目录容器当作课件');
+  }
+  {
+    const t = setup();
+    const target = { contentType: 'quiz', listResourceCode: '5.6', isQuizLearned: false };
+    t.store.state.courseListTree.sub.push(target);
+    const make = (text, order) => ({ textContent: text, order, closest: () => null,
+      getClientRects: () => [1], contains: () => false,
+      compareDocumentPosition(other) { return this.order < other.order ? 4 : 2; },
+      click() { throw new Error('多个候选不能自动点击'); } });
+    const items = [make(t.node.name, 1), make('随堂测验', 2), make('随堂测验', 3)];
+    t.box.document.querySelectorAll = (selector) => selector === 'a,button,span,div,li' ? items : [];
+    t.cx.next();
+    assert.equal(t.cx.cfg.running, false);
+    assert.equal(t.cx.state.navigationDiagnostics[0].quizLabels.length, 2);
+    console.log('PASS 目录区间存在多个测验时暂停，并导出定位诊断');
+  }
+  for (const via of ['label', 'vnode']) {
+    const t = setup();
+    const target = { contentType: 'quiz', listResourceCode: '5.6', isQuizLearned: false,
+      courseWareId: '11111111-2222-3333-4444-555555555555' };
+    t.store.state.courseListTree.sub.push(target);
+    let parentClicks = 0;
+    let childClicks = 0;
+    const child = { textContent: via === 'label' ? '随堂测验' : '进入',
+      closest: () => null, getClientRects: () => [1], contains: () => false,
+      click: () => { childClicks++; t.store.state.courseActiveList = target; } };
+    const root = { textContent: '第五章目录', closest: () => null, getClientRects: () => [1],
+      contains: (el) => el === child,
+      __vue__: { $props: { item: target }, _vnode: { children: [{ elm: child, data: { on: { click() {} } } }] } },
+      click: () => { parentClicks++; } };
+    t.box.document.querySelectorAll = (selector) => selector === 'a,button,span,div,li' ? [root, child] : [];
+    t.cx.next();
+    assert.equal(childClicks, 1);
+    assert.equal(parentClicks, 0, '不能只点击无事件的绑定容器');
+    assert.equal(t.store.state.courseActiveList, target);
+    t.api.tick();
+    assert.equal(t.cx.state.navigationDiagnostics[0].result, 'switched');
+    t.cx.pause();
+    console.log(`PASS ${via} 方式点击组件内部真实入口，并记录成功切换`);
+  }
   for (const topUp of [false, true]) {
     const t = setup();
     const nav = attachNext(t);

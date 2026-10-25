@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         万方诚信培训 · 自动刷课助手
 // @namespace    https://cx.wanfangdata.com.cn/
-// @version      1.4.5
+// @version      1.4.7
 // @description  自动播放 / 跳过已完成 / 服务端落库对账 / 随堂测验两阶段作答 / 自动考试 / 反后台暂停 / 倍速守护 / 诊断包
 // @author       local
 // @match        https://cx.wanfangdata.com.cn/e-training/*
@@ -14,7 +14,7 @@
   if (window.__CX_LOADED__) return;
   window.__CX_LOADED__ = true;
 
-  const VERSION = '1.4.5';
+  const VERSION = '1.4.7';
   const LS_KEY = 'cx_cfg_v2';
 
   /* ==================== 配置 ==================== */
@@ -104,6 +104,7 @@
     ledgerAt: 0,
     ledgerBusy: false,
     reportChecks: [],
+    navigationDiagnostics: [],
   };
 
   const isQuality = () => /\/quality\//.test(location.href);
@@ -126,6 +127,9 @@
   function invalidateTask() {
     generation++;
     activeTask = null;
+    if (pendingNavigation && pendingNavigation.attempt && pendingNavigation.attempt.result === 'pending') {
+      pendingNavigation.attempt.result = 'cancelled';
+    }
     pendingNavigation = null;
     S.busy = false;
   }
@@ -780,6 +784,83 @@
       at: new Date().toISOString(),
     };
   }
+  function locateDirectoryItem(target, list, index) {
+    const normalize = (s) => String(s || '').replace(/\s+/g, '').trim();
+    const elements = Array.from(document.querySelectorAll('a,button,span,div,li'))
+      .filter((el) => !el.closest('#cx-panel') && el.getClientRects().length);
+    const leaves = (items) => items.filter((el) => !items.some((other) => other !== el && el.contains(other)));
+    const named = (name) => name ? leaves(elements.filter((el) => normalize(el.textContent) === normalize(name))) : [];
+    const quizLabel = /^(随堂测验|章节测验|随堂测试|章节测试|课后测验|课后测试|随堂练习|章节练习|测验|测试)([（(].*[）)])?$/;
+    const labelMatches = (el) => (target.name && normalize(el.textContent) === normalize(target.name)) ||
+      (target.contentType === 'quiz' && quizLabel.test(normalize(el.textContent)));
+    function interactivePart(root) {
+      // Vue 组件根节点可能只是容器；事件实际绑在内部目录行。
+      const labels = leaves(elements.filter((el) => el !== root && root.contains(el) && labelMatches(el)));
+      if (labels.length === 1) return labels[0];
+      const clickable = [];
+      const seen = new Set();
+      function visit(vnode, depth) {
+        if (!vnode || seen.has(vnode) || depth > 30) return;
+        seen.add(vnode);
+        const el = vnode.elm;
+        if (el && elements.includes(el) && root.contains(el) && vnode.data &&
+            vnode.data.on && vnode.data.on.click && !clickable.includes(el)) clickable.push(el);
+        (vnode.children || []).forEach((child) => visit(child, depth + 1));
+        if (vnode.componentInstance) visit(vnode.componentInstance._vnode, depth + 1);
+      }
+      if (root.__vue__) visit(root.__vue__._vnode, 0);
+      const labeledClicks = clickable.filter(labelMatches);
+      if (labeledClicks.length === 1) return labeledClicks[0];
+      if (clickable.length === 1) return clickable[0];
+      return null;
+    }
+    // 优先使用页面绑定的资源身份，避免多个章节的“随堂测验”同名。
+    const fields = ['courseWareId', 'courseListId', 'quizId'];
+    const ids = fields.map((key) => target[key]).filter((id) => id &&
+      String(id).length >= 8 && !/^0{8}-0{4}-0{4}-0{4}-0{12}$/.test(String(id)));
+    function matchesProps(value, depth) {
+      if (!value || typeof value !== 'object' || Array.isArray(value) || depth > 2) return false;
+      if (fields.some((key) => target[key] && ids.includes(target[key]) && value[key] === target[key])) return true;
+      return Object.keys(value).some((key) => matchesProps(value[key], depth + 1));
+    }
+    const bound = leaves(elements.filter((el) => {
+      try {
+        if (el.getAttributeNames && el.getAttributeNames().some((key) => ids.includes(el.getAttribute(key)))) return true;
+        return !!(el.__vue__ && matchesProps(el.__vue__.$props, 0));
+      } catch (e) { return false; }
+    }));
+    if (bound.length === 1) {
+      const interactive = interactivePart(bound[0]);
+      if (interactive) return { element: interactive, via: 'resource-id-child' };
+    }
+    const byName = named(target.name);
+    if (byName.length === 1) return { element: byName[0], via: 'name' };
+
+    const quizzes = leaves(elements.filter((el) => quizLabel.test(normalize(el.textContent))));
+    if (target.contentType === 'quiz') {
+      // 用课程树中的相邻课件限定目录区间，不按“第几个测验”盲选。
+      const previous = list[index - 1];
+      const following = list[index + 1];
+      const before = previous ? named(previous.name) : [];
+      const after = following ? named(following.name) : [];
+      const precedes = (a, b) => {
+        if (!a || !b || !a.compareDocumentPosition) return false;
+        const position = a.compareDocumentPosition(b);
+        return !(position & 1) && !!(position & 4);
+      };
+      if (before.length === 1 && (after.length === 1 || !following)) {
+        const scoped = quizzes.filter((el) => precedes(before[0], el) && (!following || precedes(el, after[0])));
+        if (scoped.length === 1) return { element: scoped[0], via: 'quiz-between-lessons' };
+      }
+    }
+    if (bound.length === 1) return { element: bound[0], via: 'resource-id' };
+    S.navigationDiagnostics.push({ at: new Date().toISOString(), code: target.listResourceCode,
+      type: target.contentType, name: target.name, boundMatches: bound.length,
+      nameMatches: byName.length, quizLabels: quizzes.map((el) => String(el.textContent).slice(0, 80)).slice(0, 20) });
+    if (S.navigationDiagnostics.length > 10) S.navigationDiagnostics.shift();
+    return null;
+  }
+
   function next() {
     if (pendingNavigation) return;
     const store = getStore();
@@ -810,22 +891,26 @@
     log(`→ 下一节：${nx.name || nx.listResourceCode}`, 'ok');
     // 仅修改 Vuex 不会更新页面内部用于上报的 activeList。
     // 点击原目录，让页面自己的处理器同时更新播放源和上报身份。
-    const normalize = (s) => String(s || '').replace(/\s+/g, '').trim();
-    const name = normalize(nx.name);
-    const candidates = name ? Array.from(document.querySelectorAll('a,button,span,div,li'))
-      .filter((el) => !el.closest('#cx-panel') && el.getClientRects().length &&
-        normalize(el.textContent) === name) : [];
-    const leaves = candidates.filter((el) => !candidates.some((other) => other !== el && el.contains(other)));
-    if (leaves.length !== 1) {
+    const located = locateDirectoryItem(nx, list, nextIndex);
+    if (!located) {
       S.phase = 'blocked';
       log(`无法唯一定位下一节目录项「${nx.name || nx.listResourceCode}」，已暂停，请在页面目录手动选择`, 'err');
       setRunning(false);
       return;
     }
     const navigation = { from: cur.listResourceCode, to: nx.listResourceCode };
+    const clicked = located.element;
+    const attempt = { at: new Date().toISOString(), code: nx.listResourceCode, via: located.via,
+      tag: clicked.tagName, className: String(clicked.className || ''),
+      text: String(clicked.textContent || '').slice(0, 160), result: 'pending' };
+    S.navigationDiagnostics.push(attempt);
+    navigation.attempt = attempt;
+    if (S.navigationDiagnostics.length > 10) S.navigationDiagnostics.shift();
     pendingNavigation = navigation;
     Player.pause();
-    try { leaves[0].click(); } catch (e) {
+    log(`目录定位：${nx.listResourceCode}（${located.via}）`);
+    try { clicked.click(); } catch (e) {
+      attempt.result = 'click-error';
       S.phase = 'blocked';
       setRunning(false);
       errLog('目录切节', e);
@@ -834,6 +919,7 @@
     setTimeout(() => {
       if (pendingNavigation !== navigation) return;
       const current = getStore() && getStore().state.courseActiveList;
+      attempt.result = current && current.listResourceCode === navigation.to ? 'switched' : 'timeout';
       pendingNavigation = null;
       if (current && current.listResourceCode === navigation.to) return;
       S.phase = 'blocked';
@@ -1233,6 +1319,8 @@
     if (!node || !node.contentType) return;
     if (pendingNavigation) {
       if (node.listResourceCode === pendingNavigation.from) { S.phase = 'switching'; return; }
+      if (pendingNavigation.attempt) pendingNavigation.attempt.result =
+        node.listResourceCode === pendingNavigation.to ? 'switched' : 'other-selection';
       pendingNavigation = null;
     }
 
@@ -1318,6 +1406,7 @@
       meta: { version: VERSION, exportedAt: new Date().toISOString(), url: location.href, ua: navigator.userAgent, screen: `${screen.width}x${screen.height}`, tz: Intl.DateTimeFormat().resolvedOptions().timeZone },
       cfg: Object.assign({}, CFG),
       reportChecks: S.reportChecks.slice(),
+      navigationDiagnostics: S.navigationDiagnostics.slice(),
       phase: S.phase,
       course: {
         id: store && store.state.courseId,
